@@ -16,6 +16,7 @@ tags:
   - name: Notifications
   - name: Batches
   - name: Templates
+  - name: Realtime
 paths:
   /notifications:
     post:
@@ -258,6 +259,39 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '500': { $ref: '#/components/responses/InternalError' }
+  /ws:
+    get:
+      tags: [Realtime]
+      summary: Canlı durum akışı (WebSocket)
+      description: |
+        HTTP bağlantısını WebSocket'e yükseltir (`101 Switching Protocols`). Swagger UI WebSocket denemeyi desteklemez;
+        terminalde `go run ./cmd/wsclient <id>` kullanın.
+
+        Bağlanırken `id` (tekrarlanabilir, en fazla 100) ile dinlenecek bildirimler, `all=true` ile tümü seçilir.
+        Abone olunan her bildirim için önce **anlık durum**, sonra her değişiklikte bir olay gelir:
+        `{"id","status","attempts","error?","next_attempt_at?","at"}`. Durumlar: `processing`, `sent`, `failed`,
+        `pending` (yeniden deneme/erteleme; `next_attempt_at` dolu), `cancelled`.
+
+        Bağlantı açıkken istemci komut gönderebilir:
+        `{"action":"subscribe","ids":["..."]}` ve `{"action":"unsubscribe","ids":["..."]}`.
+        Olaylar en iyi çabayla iletilir; kalıcı durum için `GET /notifications/{id}` kullanın.
+      operationId: streamStatus
+      parameters:
+        - name: id
+          in: query
+          required: false
+          description: Dinlenecek bildirim kimliği (tekrarlanabilir).
+          schema: { type: array, items: { type: string, format: uuid }, maxItems: 100 }
+          style: form
+          explode: true
+        - name: all
+          in: query
+          required: false
+          description: "`true` ise tüm bildirimlerin olayları alınır."
+          schema: { type: boolean }
+      responses:
+        '101': { description: WebSocket bağlantısı kuruldu. }
+        '400': { $ref: '#/components/responses/BadRequest' }
 components:
   parameters:
     Id:

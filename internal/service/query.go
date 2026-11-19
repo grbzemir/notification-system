@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/events"
 )
 
 func (s *NotificationService) Get(ctx context.Context, id uuid.UUID) (*domain.Notification, error) {
@@ -15,7 +16,12 @@ func (s *NotificationService) Get(ctx context.Context, id uuid.UUID) (*domain.No
 // Cancel yalnızca pending veya scheduled bildirimi iptal eder.
 // Bu kuralın atomik uygulanması repository'deki tek UPDATE sorgusundadır.
 func (s *NotificationService) Cancel(ctx context.Context, id uuid.UUID) (*domain.Notification, error) {
-	return s.repo.Cancel(ctx, id)
+	n, err := s.repo.Cancel(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s.events.Publish(ctx, events.FromNotification(n))
+	return n, nil
 }
 
 func (s *NotificationService) BatchSummary(ctx context.Context, batchID uuid.UUID) (*domain.BatchSummary, error) {

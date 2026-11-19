@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/events"
 )
 
 // NotificationRepository service'in ihtiyaç duyduğu saklama işlemleridir.
@@ -43,6 +44,7 @@ type NotificationService struct {
 	repo      NotificationRepository
 	cache     IdempotencyCache
 	publisher Publisher
+	events    events.Publisher
 }
 
 // Option NotificationService'i isteğe bağlı bağımlılıklarla yapılandırır (functional options kalıbı).
@@ -53,8 +55,13 @@ func WithPublisher(p Publisher) Option {
 	return func(s *NotificationService) { s.publisher = p }
 }
 
+// WithEvents durum değişikliği olaylarını (WebSocket için) yayınlayan bileşeni bağlar. Verilmezse olay yayınlanmaz.
+func WithEvents(p events.Publisher) Option {
+	return func(s *NotificationService) { s.events = p }
+}
+
 func NewNotificationService(repo NotificationRepository, cache IdempotencyCache, opts ...Option) *NotificationService {
-	s := &NotificationService{repo: repo, cache: cache, publisher: noopPublisher{}}
+	s := &NotificationService{repo: repo, cache: cache, publisher: noopPublisher{}, events: events.Noop{}}
 	for _, opt := range opts {
 		opt(s)
 	}

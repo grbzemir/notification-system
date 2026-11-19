@@ -21,7 +21,7 @@ func TestSpecServed(t *testing.T) {
 	if !strings.HasPrefix(body, "openapi: 3.") {
 		t.Fatalf("spec must start with an openapi version, got %q", body[:20])
 	}
-	for _, path := range []string{"/notifications:", "/notifications/batch:", "/notifications/{id}:", "/notifications/{id}/cancel:", "/batches/{id}:", "/templates:", "/templates/{id}:"} {
+	for _, path := range []string{"/notifications:", "/notifications/batch:", "/notifications/{id}:", "/notifications/{id}/cancel:", "/batches/{id}:", "/templates:", "/templates/{id}:", "/ws:"} {
 		if !strings.Contains(body, "  "+path) {
 			t.Errorf("spec is missing path %s", path)
 		}

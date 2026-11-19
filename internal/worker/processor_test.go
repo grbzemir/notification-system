@@ -11,6 +11,7 @@ import (
 
 	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/events"
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/retry"
 )
@@ -266,5 +267,66 @@ func TestOpenCircuitDeferEvenWhenAttemptsWouldBeExhausted(t *testing.T) {
 	_ = process(st, &fakeSender{err: &circuitbreaker.OpenError{RetryAfter: 5 * time.Second}})
 	if !st.deferred || st.failed != "" {
 		t.Fatalf("outage must not fail notifications: deferred=%v failed=%q", st.deferred, st.failed)
+	}
+}
+
+type recordingEvents struct{ got []events.Event }
+
+func (r *recordingEvents) Publish(_ context.Context, e events.Event) { r.got = append(r.got, e) }
+
+func statuses(r *recordingEvents) []string {
+	var out []string
+	for _, e := range r.got {
+		out = append(out, e.Status)
+	}
+	return out
+}
+
+func processWithEvents(st *fakeStore, snd *fakeSender) *recordingEvents {
+	rec := &recordingEvents{}
+	_ = NewProcessor(st, snd, &fakeLimiter{}, testPolicy, time.Minute).WithEvents(rec).Process(context.Background(), st.n.ID)
+	return rec
+}
+
+func TestEventsOnSuccess(t *testing.T) {
+	rec := processWithEvents(&fakeStore{n: newN()}, &fakeSender{resp: &provider.Response{MessageID: "m"}})
+	if got := statuses(rec); len(got) != 2 || got[0] != "processing" || got[1] != "sent" {
+		t.Fatalf("events = %v, want [processing sent]", got)
+	}
+}
+
+func TestEventsOnRetryCarryReasonAndNextAttempt(t *testing.T) {
+	rec := processWithEvents(&fakeStore{n: newN()}, &fakeSender{err: &provider.Error{StatusCode: 503, Retryable: true, Err: errors.New("down")}})
+	if got := statuses(rec); len(got) != 2 || got[1] != "pending" {
+		t.Fatalf("events = %v, want [processing pending]", got)
+	}
+	e := rec.got[1]
+	if e.Error == "" || e.NextAttemptAt == nil || e.Attempts != 1 {
+		t.Fatalf("retry event = %+v", e)
+	}
+}
+
+func TestEventsOnPermanentFailure(t *testing.T) {
+	rec := processWithEvents(&fakeStore{n: newN()}, &fakeSender{err: &provider.Error{StatusCode: 400, Err: errors.New("bad")}})
+	if got := statuses(rec); len(got) != 2 || got[1] != "failed" || rec.got[1].Error == "" {
+		t.Fatalf("events = %+v", rec.got)
+	}
+}
+
+func TestNoEventWhenNotClaimable(t *testing.T) {
+	rec := &recordingEvents{}
+	st := &fakeStore{claimErr: domain.ErrNotClaimable}
+	_ = NewProcessor(st, &fakeSender{}, &fakeLimiter{}, testPolicy, time.Minute).WithEvents(rec).Process(context.Background(), uuid.New())
+	if len(rec.got) != 0 {
+		t.Fatalf("unexpected events: %+v", rec.got)
+	}
+}
+
+func TestEventAfterDeferShowsAttemptNotSpent(t *testing.T) {
+	n := newN() // Attempts=1 (Claim artırdı); Defer geri alır
+	rec := processWithEvents(&fakeStore{n: n}, &fakeSender{err: &circuitbreaker.OpenError{RetryAfter: 10 * time.Second}})
+	last := rec.got[len(rec.got)-1]
+	if last.Status != "pending" || last.Attempts != 0 || last.NextAttemptAt == nil {
+		t.Fatalf("defer event = %+v", last)
 	}
 }

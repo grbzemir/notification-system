@@ -13,6 +13,7 @@ import (
 	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/config"
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/events/redisbus"
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/queue"
 	"github.com/grbzemir/notification-system/internal/ratelimit"
@@ -69,7 +70,7 @@ func run() error {
 	)
 	limiter := ratelimit.New(ratelimit.NewRedisBackend(rdb, cfg.RateLimitPerSec))
 	policy := retry.Policy{MaxAttempts: cfg.RetryMaxAttempts, Base: cfg.RetryBase, Max: cfg.RetryMax}
-	proc := worker.NewProcessor(repo, client, limiter, policy, cfg.Lease)
+	proc := worker.NewProcessor(repo, client, limiter, policy, cfg.Lease).WithEvents(redisbus.New(rdb))
 
 	handler := func(ctx context.Context, m queue.Message) error {
 		id, err := uuid.Parse(m.ID) // DecodeMessage zaten doğruladı

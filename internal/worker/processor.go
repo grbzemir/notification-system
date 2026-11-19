@@ -12,6 +12,7 @@ import (
 
 	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/events"
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/retry"
 )
@@ -45,12 +46,29 @@ type Processor struct {
 	limiter Limiter
 	policy  retry.Policy
 	lease   time.Duration
+	events  events.Publisher
 }
 
 // NewProcessor lease: bir "processing" kaydının, sahibi çöktü sayılıp başkası tarafından devralınabilmesi için geçmesi gereken süre.
 // Provider zaman aşımından (5 sn) ve rate limit beklemesinden belirgin biçimde uzun olmalıdır.
 func NewProcessor(store Store, sender Sender, limiter Limiter, policy retry.Policy, lease time.Duration) *Processor {
-	return &Processor{store: store, sender: sender, limiter: limiter, policy: policy, lease: lease}
+	return &Processor{store: store, sender: sender, limiter: limiter, policy: policy, lease: lease, events: events.Noop{}}
+}
+
+// WithEvents durum değişikliği olaylarını yayınlayan bileşeni bağlar (WebSocket canlı güncellemeleri için).
+func (p *Processor) WithEvents(e events.Publisher) *Processor {
+	p.events = e
+	return p
+}
+
+// emit olayı yayınlar. Yayın en iyi çabadır ve iş akışını asla etkilemez; gerçek durum veritabanındadır.
+func (p *Processor) emit(ctx context.Context, n *domain.Notification, status domain.Status, attempts int, reason string, next time.Duration) {
+	e := events.Event{ID: n.ID.String(), Status: string(status), Attempts: attempts, Error: reason, At: time.Now().UTC()}
+	if next > 0 {
+		t := e.At.Add(next)
+		e.NextAttemptAt = &t
+	}
+	p.events.Publish(ctx, e)
 }
 
 // Process tek bir bildirimi işler.
@@ -66,6 +84,8 @@ func (p *Processor) Process(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
+
+	p.emit(ctx, n, domain.StatusProcessing, n.Attempts, "", 0)
 
 	// Hız sınırı: sahiplendikten SONRA bekliyoruz, çünkü iptal edilmiş bildirimler hız bütçesi harcamasın.
 	if err := p.limiter.Wait(ctx, string(n.Channel)); err != nil {
@@ -86,6 +106,7 @@ func (p *Processor) Process(ctx context.Context, id uuid.UUID) error {
 		slog.Error("sent but could not record result; may be re-sent after lease expires", "id", n.ID, "error", err)
 		return fmt.Errorf("mark sent: %w", err)
 	}
+	p.emit(ctx, n, domain.StatusSent, n.Attempts, "", 0)
 	slog.Info("notification sent", "id", n.ID, "channel", n.Channel, "provider_message_id", resp.MessageID)
 	return nil
 }
@@ -105,10 +126,10 @@ func (p *Processor) handleSendError(ctx context.Context, n *domain.Notification,
 		"retryable", retryable, "error", err)
 
 	if !retryable {
-		return p.fail(ctx, n.ID, err.Error())
+		return p.fail(ctx, n, err.Error())
 	}
 	if p.policy.Exhausted(n.Attempts) {
-		return p.fail(ctx, n.ID, fmt.Sprintf("gave up after %d attempts: %v", n.Attempts, err))
+		return p.fail(ctx, n, fmt.Sprintf("gave up after %d attempts: %v", n.Attempts, err))
 	}
 
 	var minDelay time.Duration
@@ -123,6 +144,7 @@ func (p *Processor) handleSendError(ctx context.Context, n *domain.Notification,
 	if err := p.store.Retry(saveCtx, n.ID, err.Error(), delay); err != nil {
 		return fmt.Errorf("schedule retry: %w", err)
 	}
+	p.emit(ctx, n, domain.StatusPending, n.Attempts, err.Error(), delay)
 	slog.Info("retry scheduled", "id", n.ID, "attempt", n.Attempts, "max_attempts", p.policy.MaxAttempts,
 		"delay", delay.Round(time.Millisecond).String())
 	return nil
@@ -145,16 +167,18 @@ func (p *Processor) deferUntilCircuitCloses(ctx context.Context, n *domain.Notif
 	if derr := p.store.Defer(saveCtx, n.ID, delay); derr != nil {
 		return fmt.Errorf("defer: %w", derr)
 	}
+	p.emit(ctx, n, domain.StatusPending, n.Attempts-1, "provider circuit open", delay)
 	slog.Info("circuit open, notification deferred", "id", n.ID, "channel", n.Channel, "delay", delay.Round(time.Millisecond).String())
 	return nil
 }
 
-func (p *Processor) fail(ctx context.Context, id uuid.UUID, reason string) error {
+func (p *Processor) fail(ctx context.Context, n *domain.Notification, reason string) error {
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := p.store.MarkFailed(saveCtx, id, reason); err != nil {
+	if err := p.store.MarkFailed(saveCtx, n.ID, reason); err != nil {
 		return fmt.Errorf("mark failed: %w", err)
 	}
+	p.emit(ctx, n, domain.StatusFailed, n.Attempts, reason, 0)
 	return nil
 }
 

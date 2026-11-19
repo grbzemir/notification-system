@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/grbzemir/notification-system/internal/config"
+	"github.com/grbzemir/notification-system/internal/events/redisbus"
 	"github.com/grbzemir/notification-system/internal/handler"
 	"github.com/grbzemir/notification-system/internal/queue"
+	"github.com/grbzemir/notification-system/internal/realtime"
 	"github.com/grbzemir/notification-system/internal/relay"
 	"github.com/grbzemir/notification-system/internal/repository"
 	"github.com/grbzemir/notification-system/internal/service"
@@ -66,17 +68,23 @@ func run() error {
 	// Bağımlılıkları aşağıdan yukarıya bağlıyoruz: repository -> service -> handler.
 	repo := repository.NewNotificationRepository(pool)
 	idem := repository.NewIdempotencyStore(rdb, idempotencyTTL)
-	svc := service.NewNotificationService(repo, idem, service.WithPublisher(pub))
+	bus := redisbus.New(rdb)
+	svc := service.NewNotificationService(repo, idem, service.WithPublisher(pub), service.WithEvents(bus))
 	tplSvc := service.NewTemplateService(repository.NewTemplateRepository(pool))
 	nh := handler.NewNotificationHandler(svc).WithTemplates(tplSvc)
 	th := handler.NewTemplateHandler(tplSvc)
+
+	// Worker'ın Redis'e yayınladığı durum olaylarını bağlı WebSocket istemcilerine dağıtır.
+	hub := realtime.NewHub()
+	go bus.Subscribe(ctx, hub.Broadcast)
+	wh := handler.NewWSHandler(hub, svc)
 
 	// Kuyruğa bırakılamamış bildirimleri arka planda yeniden yayınlar. ctx iptal olunca durur.
 	go relay.New(repo, pub).Run(ctx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           handler.NewRouter(nh, th),
+		Handler:           handler.NewRouter(nh, th, wh),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
