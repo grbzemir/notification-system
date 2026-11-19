@@ -35,17 +35,19 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := repository.Migrate(cfg.DatabaseURL); err != nil {
-		return err
-	}
-	slog.Info("migrations applied")
-
+	// Önce havuzu aç: NewPool Postgres hazır olana kadar bağlantıyı yeniden dener.
+	// Migrate'in kendi yeniden denemesi yok, bu yüzden DB'nin kabul ettiğinden emin olduktan sonra çalıştırıyoruz.
 	pool, err := repository.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 	slog.Info("database connected")
+
+	if err := repository.Migrate(cfg.DatabaseURL); err != nil {
+		return err
+	}
+	slog.Info("migrations applied")
 
 	rdb, err := repository.NewRedis(ctx, cfg.RedisAddr)
 	if err != nil {
