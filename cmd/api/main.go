@@ -16,6 +16,8 @@ import (
 	"github.com/grbzemir/notification-system/internal/service"
 )
 
+const idempotencyTTL = 24 * time.Hour
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -43,9 +45,17 @@ func run() error {
 	defer pool.Close()
 	slog.Info("database connected")
 
+	rdb, err := repository.NewRedis(ctx, cfg.RedisAddr)
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+	slog.Info("redis connected")
+
 	// Bağımlılıkları aşağıdan yukarıya bağlıyoruz: repository -> service -> handler.
 	repo := repository.NewNotificationRepository(pool)
-	svc := service.NewNotificationService(repo)
+	idem := repository.NewIdempotencyStore(rdb, idempotencyTTL)
+	svc := service.NewNotificationService(repo, idem)
 	nh := handler.NewNotificationHandler(svc)
 
 	srv := &http.Server{
