@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/grbzemir/notification-system/internal/domain"
 	"github.com/grbzemir/notification-system/internal/provider"
+	"github.com/grbzemir/notification-system/internal/retry"
 )
 
 type fakeStore struct {
@@ -19,6 +21,10 @@ type fakeStore struct {
 	sentCtxErr error
 	failed     string
 	released   bool
+	retried    bool
+	retryDelay time.Duration
+	retryWhy   string
+	retryErr   error
 	markErr    error
 	events     []string
 }
@@ -39,6 +45,11 @@ func (s *fakeStore) MarkFailed(_ context.Context, _ uuid.UUID, reason string) er
 	s.events = append(s.events, "failed")
 	s.failed = reason
 	return nil
+}
+func (s *fakeStore) Retry(_ context.Context, _ uuid.UUID, reason string, d time.Duration) error {
+	s.events = append(s.events, "retry")
+	s.retried, s.retryWhy, s.retryDelay = true, reason, d
+	return s.retryErr
 }
 func (s *fakeStore) Release(context.Context, uuid.UUID) error {
 	s.events = append(s.events, "release")
@@ -71,13 +82,16 @@ func (l *fakeLimiter) Wait(_ context.Context, ch string) error {
 	return l.err
 }
 
+// Rand=0 -> bekleme üst sınırın tam yarısı: sonuç deterministik.
+var testPolicy = retry.Policy{MaxAttempts: 3, Base: 10 * time.Second, Max: time.Minute, Rand: func() float64 { return 0 }}
+
 func newN() *domain.Notification {
 	return &domain.Notification{ID: uuid.New(), Recipient: "+905551234567", Channel: domain.ChannelSMS, Content: "hi", Attempts: 1}
 }
 
 func TestProcessSuccess(t *testing.T) {
 	st, snd, lim := &fakeStore{n: newN()}, &fakeSender{resp: &provider.Response{MessageID: "m-1"}}, &fakeLimiter{}
-	if err := NewProcessor(st, snd, lim, time.Minute).Process(context.Background(), st.n.ID); err != nil {
+	if err := NewProcessor(st, snd, lim, testPolicy, time.Minute).Process(context.Background(), st.n.ID); err != nil {
 		t.Fatal(err)
 	}
 	if st.sentID != "m-1" {
@@ -96,7 +110,7 @@ func TestProcessSuccess(t *testing.T) {
 
 func TestProcessSkipsWhenNotClaimable(t *testing.T) {
 	st, snd, lim := &fakeStore{claimErr: domain.ErrNotClaimable}, &fakeSender{}, &fakeLimiter{}
-	if err := NewProcessor(st, snd, lim, time.Minute).Process(context.Background(), uuid.New()); err != nil {
+	if err := NewProcessor(st, snd, lim, testPolicy, time.Minute).Process(context.Background(), uuid.New()); err != nil {
 		t.Fatalf("not claimable must be a quiet success, got %v", err)
 	}
 	if len(snd.got) != 0 || len(lim.channels) != 0 {
@@ -107,7 +121,7 @@ func TestProcessSkipsWhenNotClaimable(t *testing.T) {
 func TestProcessReturnsErrorOnClaimInfraFailure(t *testing.T) {
 	st := &fakeStore{claimErr: errors.New("db down")}
 	snd := &fakeSender{}
-	if err := NewProcessor(st, snd, &fakeLimiter{}, time.Minute).Process(context.Background(), uuid.New()); err == nil {
+	if err := NewProcessor(st, snd, &fakeLimiter{}, testPolicy, time.Minute).Process(context.Background(), uuid.New()); err == nil {
 		t.Fatal("expected error so the message is requeued")
 	}
 	if len(snd.got) != 0 {
@@ -115,24 +129,77 @@ func TestProcessReturnsErrorOnClaimInfraFailure(t *testing.T) {
 	}
 }
 
-func TestProcessProviderFailureMarksFailedAndAcks(t *testing.T) {
-	for name, perr := range map[string]error{
-		"permanent": &provider.Error{StatusCode: 400, Err: errors.New("bad")},
-		"retryable": &provider.Error{StatusCode: 503, Retryable: true, Err: errors.New("down")},
-	} {
-		st, snd := &fakeStore{n: newN()}, &fakeSender{err: perr}
-		if err := NewProcessor(st, snd, &fakeLimiter{}, time.Minute).Process(context.Background(), st.n.ID); err != nil {
-			t.Fatalf("%s: err = %v", name, err)
-		}
-		if st.failed == "" || st.sentID != "" {
-			t.Fatalf("%s: failed=%q sent=%q", name, st.failed, st.sentID)
-		}
+func process(st *fakeStore, snd *fakeSender) error {
+	return NewProcessor(st, snd, &fakeLimiter{}, testPolicy, time.Minute).Process(context.Background(), st.n.ID)
+}
+
+func TestPermanentProviderErrorFailsImmediately(t *testing.T) {
+	st := &fakeStore{n: newN()}
+	if err := process(st, &fakeSender{err: &provider.Error{StatusCode: 400, Err: errors.New("bad")}}); err != nil {
+		t.Fatal(err)
+	}
+	if st.failed == "" || st.retried {
+		t.Fatalf("failed=%q retried=%v", st.failed, st.retried)
+	}
+}
+
+func TestRetryableErrorSchedulesBackoffRetry(t *testing.T) {
+	st := &fakeStore{n: newN()} // Attempts=1
+	err := process(st, &fakeSender{err: &provider.Error{StatusCode: 503, Retryable: true, Err: errors.New("down")}})
+	if err != nil {
+		t.Fatalf("scheduling a retry is a successful outcome, got %v", err)
+	}
+	if !st.retried || st.failed != "" || st.sentID != "" {
+		t.Fatalf("retried=%v failed=%q sent=%q", st.retried, st.failed, st.sentID)
+	}
+	if st.retryDelay != 5*time.Second { // 1. denemeden sonra: üst sınır 10s, Rand=0 -> 5s
+		t.Fatalf("delay = %v, want 5s", st.retryDelay)
+	}
+}
+
+func TestRetryDelayGrowsWithAttempts(t *testing.T) {
+	n := newN()
+	n.Attempts = 2
+	st := &fakeStore{n: n}
+	_ = process(st, &fakeSender{err: &provider.Error{StatusCode: 500, Retryable: true, Err: errors.New("x")}})
+	if st.retryDelay != 10*time.Second { // üst sınır 20s -> 10s
+		t.Fatalf("delay = %v, want 10s", st.retryDelay)
+	}
+}
+
+func TestRetryGivesUpWhenAttemptsExhausted(t *testing.T) {
+	n := newN()
+	n.Attempts = 3 // MaxAttempts
+	st := &fakeStore{n: n}
+	if err := process(st, &fakeSender{err: &provider.Error{StatusCode: 503, Retryable: true, Err: errors.New("down")}}); err != nil {
+		t.Fatal(err)
+	}
+	if st.retried || st.failed == "" {
+		t.Fatalf("retried=%v failed=%q", st.retried, st.failed)
+	}
+	if !strings.Contains(st.failed, "gave up after 3 attempts") {
+		t.Fatalf("reason = %q", st.failed)
+	}
+}
+
+func TestRetryAfterFromProviderIsHonoured(t *testing.T) {
+	st := &fakeStore{n: newN()}
+	_ = process(st, &fakeSender{err: &provider.Error{StatusCode: 429, Retryable: true, RetryAfter: 45 * time.Second, Err: errors.New("slow")}})
+	if st.retryDelay != 45*time.Second {
+		t.Fatalf("delay = %v, want 45s", st.retryDelay)
+	}
+}
+
+func TestFailureToScheduleRetryRequeuesMessage(t *testing.T) {
+	st := &fakeStore{n: newN(), retryErr: errors.New("db down")}
+	if err := process(st, &fakeSender{err: &provider.Error{StatusCode: 503, Retryable: true, Err: errors.New("x")}}); err == nil {
+		t.Fatal("expected error so the message is requeued")
 	}
 }
 
 func TestProcessRateLimitErrorReleasesClaimAndRequeues(t *testing.T) {
 	st, snd := &fakeStore{n: newN()}, &fakeSender{}
-	err := NewProcessor(st, snd, &fakeLimiter{err: context.Canceled}, time.Minute).Process(context.Background(), st.n.ID)
+	err := NewProcessor(st, snd, &fakeLimiter{err: context.Canceled}, testPolicy, time.Minute).Process(context.Background(), st.n.ID)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -145,7 +212,7 @@ func TestResultIsRecordedEvenIfContextCancelledDuringSend(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &fakeStore{n: newN()}
 	snd := &fakeSender{resp: &provider.Response{MessageID: "m-2"}, after: cancel}
-	if err := NewProcessor(st, snd, &fakeLimiter{}, time.Minute).Process(ctx, st.n.ID); err != nil {
+	if err := NewProcessor(st, snd, &fakeLimiter{}, testPolicy, time.Minute).Process(ctx, st.n.ID); err != nil {
 		t.Fatal(err)
 	}
 	if st.sentID != "m-2" || st.sentCtxErr != nil {
@@ -156,7 +223,7 @@ func TestResultIsRecordedEvenIfContextCancelledDuringSend(t *testing.T) {
 func TestMarkSentFailureRequeues(t *testing.T) {
 	st := &fakeStore{n: newN(), markErr: errors.New("db down")}
 	snd := &fakeSender{resp: &provider.Response{MessageID: "m"}}
-	if err := NewProcessor(st, snd, &fakeLimiter{}, time.Minute).Process(context.Background(), st.n.ID); err == nil {
+	if err := NewProcessor(st, snd, &fakeLimiter{}, testPolicy, time.Minute).Process(context.Background(), st.n.ID); err == nil {
 		t.Fatal("expected error")
 	}
 }
