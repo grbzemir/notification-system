@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	pgUniqueViolation        = "23505"
-	idempotencyUniqueIndex   = "uq_notifications_idempotency_key"
-	notificationColumns      = `id::text, batch_id::text, idempotency_key, recipient, channel, content,
+	pgUniqueViolation      = "23505"
+	idempotencyUniqueIndex = "uq_notifications_idempotency_key"
+	notificationColumns    = `id::text, batch_id::text, idempotency_key, recipient, channel, content,
 		priority, status, attempts, last_error, provider_message_id, scheduled_at, sent_at, created_at, updated_at`
 )
 
