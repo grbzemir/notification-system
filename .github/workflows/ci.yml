@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Aynı dalda yeni bir push gelince eski çalışmayı iptal eder.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Format, vet and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -count=1
+
+  e2e:
+    name: Docker Compose smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start the whole stack
+        run: docker compose up --build -d --wait
+
+      - name: Notification travels API -> RabbitMQ -> worker -> provider
+        run: |
+          curl -sf localhost:8080/docs > /dev/null
+
+          ID=$(curl -sf -X POST localhost:8080/api/v1/notifications \
+            -H 'Content-Type: application/json' \
+            -d '{"recipient":"+905551234567","channel":"sms","content":"ci smoke test"}' | jq -r .id)
+          echo "created $ID"
+
+          status=""
+          for i in $(seq 1 30); do
+            status=$(curl -sf localhost:8080/api/v1/notifications/$ID | jq -r .status)
+            if [ "$status" = "sent" ]; then
+              echo "notification sent after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "notification was not sent, last status: $status"
+          exit 1
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=100
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
