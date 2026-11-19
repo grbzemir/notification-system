@@ -12,6 +12,8 @@ import (
 
 	"github.com/grbzemir/notification-system/internal/config"
 	"github.com/grbzemir/notification-system/internal/handler"
+	"github.com/grbzemir/notification-system/internal/queue"
+	"github.com/grbzemir/notification-system/internal/relay"
 	"github.com/grbzemir/notification-system/internal/repository"
 	"github.com/grbzemir/notification-system/internal/service"
 )
@@ -52,11 +54,21 @@ func run() error {
 	defer rdb.Close()
 	slog.Info("redis connected")
 
+	pub, err := queue.NewPublisher(ctx, cfg.RabbitMQURL)
+	if err != nil {
+		return err
+	}
+	defer pub.Close()
+	slog.Info("rabbitmq connected")
+
 	// Bağımlılıkları aşağıdan yukarıya bağlıyoruz: repository -> service -> handler.
 	repo := repository.NewNotificationRepository(pool)
 	idem := repository.NewIdempotencyStore(rdb, idempotencyTTL)
-	svc := service.NewNotificationService(repo, idem)
+	svc := service.NewNotificationService(repo, idem, service.WithPublisher(pub))
 	nh := handler.NewNotificationHandler(svc)
+
+	// Kuyruğa bırakılamamış bildirimleri arka planda yeniden yayınlar. ctx iptal olunca durur.
+	go relay.New(repo, pub).Run(ctx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
