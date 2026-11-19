@@ -26,7 +26,9 @@ func (s *NotificationService) CreateBatch(ctx context.Context, items []domain.Ne
 			Channel:   in.Channel,
 			Content:   in.Content,
 			Priority:  in.Priority,
-			Status:    domain.StatusPending,
+			Status:    initialStatus(in),
+
+			ScheduledAt: in.ScheduledAt,
 		}
 	}
 
@@ -34,6 +36,8 @@ func (s *NotificationService) CreateBatch(ctx context.Context, items []domain.Ne
 		return uuid.Nil, 0, err
 	}
 
-	s.enqueue(ctx, notifications...)
+	if ready := publishable(notifications); len(ready) > 0 {
+		s.enqueue(ctx, ready...)
+	}
 	return batchID, len(notifications), nil
 }

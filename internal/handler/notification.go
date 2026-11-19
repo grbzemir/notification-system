@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -37,6 +38,8 @@ type createRequest struct {
 	Channel   string `json:"channel"`
 	Content   string `json:"content"`
 	Priority  string `json:"priority"`
+
+	ScheduledAt *time.Time `json:"scheduled_at"`
 }
 
 func (c createRequest) toDomain() domain.NewNotification {
@@ -45,6 +48,8 @@ func (c createRequest) toDomain() domain.NewNotification {
 		Channel:   domain.Channel(c.Channel),
 		Content:   c.Content,
 		Priority:  domain.Priority(c.Priority),
+
+		ScheduledAt: c.ScheduledAt,
 	}
 }
 

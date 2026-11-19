@@ -16,8 +16,8 @@ import (
 // pgx.Batch sorguları tek ağ turunda gönderir.
 func (r *NotificationRepository) CreateBatch(ctx context.Context, items []*domain.Notification) error {
 	const q = `
-		INSERT INTO notifications (id, batch_id, recipient, channel, content, priority, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		INSERT INTO notifications (id, batch_id, recipient, channel, content, priority, status, scheduled_at, next_attempt_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -32,7 +32,7 @@ func (r *NotificationRepository) CreateBatch(ctx context.Context, items []*domai
 			s := n.BatchID.String()
 			batchID = &s
 		}
-		batch.Queue(q, n.ID.String(), batchID, n.Recipient, string(n.Channel), n.Content, string(n.Priority), string(n.Status))
+		batch.Queue(q, n.ID.String(), batchID, n.Recipient, string(n.Channel), n.Content, string(n.Priority), string(n.Status), n.ScheduledAt)
 	}
 
 	br := tx.SendBatch(ctx, batch)

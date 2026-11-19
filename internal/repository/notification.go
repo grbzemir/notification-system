@@ -31,12 +31,12 @@ func NewNotificationRepository(pool *pgxpool.Pool) *NotificationRepository {
 // Create bildirimi ekler. İdempotency key daha önce kullanılmışsa domain.ErrDuplicateKey döner.
 func (r *NotificationRepository) Create(ctx context.Context, n *domain.Notification) error {
 	const q = `
-		INSERT INTO notifications (id, idempotency_key, recipient, channel, content, priority, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO notifications (id, idempotency_key, recipient, channel, content, priority, status, scheduled_at, next_attempt_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		RETURNING attempts, created_at, updated_at`
 
 	err := r.pool.QueryRow(ctx, q,
-		n.ID.String(), n.IdempotencyKey, n.Recipient, string(n.Channel), n.Content, string(n.Priority), string(n.Status),
+		n.ID.String(), n.IdempotencyKey, n.Recipient, string(n.Channel), n.Content, string(n.Priority), string(n.Status), n.ScheduledAt,
 	).Scan(&n.Attempts, &n.CreatedAt, &n.UpdatedAt)
 
 	var pgErr *pgconn.PgError

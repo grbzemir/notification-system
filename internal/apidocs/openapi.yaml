@@ -8,7 +8,8 @@ info:
     **Akış:** istek kaydedilir (`pending`) ve RabbitMQ kuyruğuna bırakılır; worker kanal başına hız sınırı
     (100/sn) altında sağlayıcıya gönderir. Geçici hatalar üstel geri çekilmeyle en fazla 5 kez denenir.
 
-    **Durumlar:** `pending` → `processing` → `sent` | `failed`. `pending` (retry bekleyenler dahil) iptal edilebilir → `cancelled`.
+    **Durumlar:** `pending` → `processing` → `sent` | `failed`. `scheduled_at` ile zamanlanan bildirim önce `scheduled`
+    olur, vakti gelince `pending`'e geçer. `scheduled` ve `pending` (retry bekleyenler dahil) iptal edilebilir → `cancelled`.
 servers:
   - url: /api/v1
 tags:
@@ -149,7 +150,7 @@ paths:
       tags: [Notifications]
       summary: Bildirimi iptal et
       description: |
-        Yalnızca henüz gönderilmemiş (`pending`, retry bekleyenler dahil) bildirimler iptal edilir. Zaten iptal edilmiş
+        Yalnızca henüz gönderilmemiş (`scheduled` ve `pending`, retry bekleyenler dahil) bildirimler iptal edilir. Zaten iptal edilmiş
         bildirim için işlem idempotenttir (`200`). Gönderilmiş (`sent`), başarısız (`failed`) ya da işlenmekte olan
         (`processing`) bildirim için `409` döner.
       operationId: cancelNotification
@@ -224,6 +225,12 @@ components:
           type: string
           description: "En fazla karakter sayısı: SMS 160, push 256, e-posta 10000."
         priority: { $ref: '#/components/schemas/Priority' }
+        scheduled_at:
+          type: string
+          format: date-time
+          description: |
+            Verilirse bildirim bu zamana kadar bekletilir (`scheduled`), vakti gelince normal akışa girer (RFC 3339).
+            Gelecekte ve en fazla 365 gün ilerisinde olmalıdır. Vakti gelmeden `cancel` ile iptal edilebilir.
     Notification:
       type: object
       required: [id, recipient, channel, content, priority, status, attempts, created_at, updated_at]

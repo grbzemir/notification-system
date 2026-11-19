@@ -51,6 +51,13 @@ func (r *NotificationRepository) PublishUnqueued(ctx context.Context, minAge tim
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // Commit sonrası Rollback zararsızdır
 
+	// Vakti gelen zamanlanmış bildirimler normal akışa girer (pending). next_attempt_at oluşturulurken scheduled_at'e
+	// eşitlendiği için aşağıdaki sorgu bunları hemen yakalar.
+	if _, err := tx.Exec(ctx, `UPDATE notifications SET status = 'pending', updated_at = now()
+		WHERE status = 'scheduled' AND scheduled_at <= now()`); err != nil {
+		return 0, err
+	}
+
 	items, err := selectUnqueued(ctx, tx, minAge, limit)
 	if err != nil {
 		return 0, err

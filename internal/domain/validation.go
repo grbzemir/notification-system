@@ -5,6 +5,7 @@ import (
 	"net/mail"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -17,6 +18,9 @@ var maxContentLength = map[Channel]int{
 
 const maxPushTokenLength = 4096
 
+// MaxScheduleAhead bir bildirimin en fazla ne kadar ilerisine zamanlanabileceğidir.
+const MaxScheduleAhead = 365 * 24 * time.Hour
+
 // E.164: "+" ile başlayan, 8-15 haneli uluslararası telefon formatı.
 var e164 = regexp.MustCompile(`^\+[1-9]\d{7,14}$`)
 
@@ -26,6 +30,9 @@ type NewNotification struct {
 	Channel   Channel
 	Content   string
 	Priority  Priority
+
+	// ScheduledAt doluysa bildirim bu zamana kadar bekletilir ("scheduled"), sonra normal akışa girer.
+	ScheduledAt *time.Time
 }
 
 // FieldError tek bir alandaki doğrulama hatasıdır.
@@ -77,6 +84,16 @@ func (n *NewNotification) Validate() error {
 	} else if n.Channel.Valid() {
 		if max := maxContentLength[n.Channel]; utf8.RuneCountInString(n.Content) > max {
 			add("content", fmt.Sprintf("must be at most %d characters for channel %s", max, n.Channel))
+		}
+	}
+
+	if n.ScheduledAt != nil {
+		now := time.Now()
+		switch {
+		case !n.ScheduledAt.After(now):
+			add("scheduled_at", "must be in the future")
+		case n.ScheduledAt.After(now.Add(MaxScheduleAhead)):
+			add("scheduled_at", "must be at most 365 days ahead")
 		}
 	}
 

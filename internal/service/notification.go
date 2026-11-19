@@ -84,7 +84,9 @@ func (s *NotificationService) Create(ctx context.Context, in domain.NewNotificat
 		Channel:   in.Channel,
 		Content:   in.Content,
 		Priority:  in.Priority,
-		Status:    domain.StatusPending,
+		Status:    initialStatus(in),
+
+		ScheduledAt: in.ScheduledAt,
 	}
 	if idempotencyKey != "" {
 		n.IdempotencyKey = &idempotencyKey
@@ -106,7 +108,9 @@ func (s *NotificationService) Create(ctx context.Context, in domain.NewNotificat
 	if idempotencyKey != "" {
 		s.remember(ctx, idempotencyKey, n.ID)
 	}
-	s.enqueue(ctx, n)
+	if n.Status == domain.StatusPending { // zamanlanmışları relay, vakti gelince yayımlar
+		s.enqueue(ctx, n)
+	}
 	return n, true, nil
 }
 
@@ -163,8 +167,36 @@ func replay(existing *domain.Notification, in domain.NewNotification) (*domain.N
 	if existing.Recipient != in.Recipient ||
 		existing.Channel != in.Channel ||
 		existing.Content != in.Content ||
-		existing.Priority != in.Priority {
+		existing.Priority != in.Priority ||
+		!sameInstant(existing.ScheduledAt, in.ScheduledAt) {
 		return nil, false, domain.ErrIdempotencyConflict
 	}
 	return existing, false, nil
+}
+
+// initialStatus zamanlanmış bildirimi "scheduled", diğerlerini "pending" olarak başlatır.
+func initialStatus(in domain.NewNotification) domain.Status {
+	if in.ScheduledAt != nil {
+		return domain.StatusScheduled
+	}
+	return domain.StatusPending
+}
+
+// publishable içinden hemen kuyruğa bırakılacakları (zamanlanmamış olanları) ayırır.
+func publishable(ns []*domain.Notification) []*domain.Notification {
+	var out []*domain.Notification
+	for _, n := range ns {
+		if n.Status == domain.StatusPending {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// sameInstant iki zaman damgasını veritabanının hassasiyetiyle (mikrosaniye) karşılaştırır; ikisi de nil ise eşittir.
+func sameInstant(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Truncate(time.Microsecond).Equal(b.Truncate(time.Microsecond))
 }
