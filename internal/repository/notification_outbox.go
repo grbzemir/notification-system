@@ -30,9 +30,13 @@ func (r *NotificationRepository) MarkQueued(ctx context.Context, ids []uuid.UUID
 	return err
 }
 
-// PublishUnqueued kuyruğa bırakılmamış, minAge'den eski "pending" kayıtları kilitleyip publish ile yayınlar
-// ve aynı transaction içinde işaretler. FOR UPDATE SKIP LOCKED sayesinde birden fazla örnek (API/relay)
-// aynı satırı birlikte almaz: kilitli satırlar atlanır. Yayınlanan kayıt sayısını döner.
+// PublishUnqueued kuyruğa bırakılmamış "pending" kayıtları kilitleyip publish ile yayınlar ve aynı transaction
+// içinde işaretler. İki tür kayıt bulur:
+//   - ilk deneme: next_attempt_at boş, kayıt minAge'den eski (API kendi yayınını bitirmeye fırsat bulsun diye)
+//   - yeniden deneme: next_attempt_at gelmiş
+//
+// FOR UPDATE SKIP LOCKED sayesinde birden fazla örnek (API/worker relay'leri) aynı satırı birlikte almaz.
+// Yayınlanan kayıt sayısını döner.
 func (r *NotificationRepository) PublishUnqueued(ctx context.Context, minAge time.Duration, limit int,
 	publish func(context.Context, []*domain.Notification) error) (int, error) {
 
@@ -71,8 +75,11 @@ func selectUnqueued(ctx context.Context, tx pgx.Tx, minAge time.Duration, limit 
 	const q = `SELECT ` + notificationColumns + `
 		FROM notifications
 		WHERE status = 'pending' AND queued_at IS NULL
-		  AND created_at < now() - make_interval(secs => $1)
-		ORDER BY created_at
+		  AND CASE WHEN next_attempt_at IS NULL
+		           THEN created_at < now() - make_interval(secs => $1)
+		           ELSE next_attempt_at <= now()
+		      END
+		ORDER BY COALESCE(next_attempt_at, created_at)
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED`
 

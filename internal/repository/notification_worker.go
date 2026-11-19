@@ -51,3 +51,13 @@ func (r *NotificationRepository) Release(ctx context.Context, id uuid.UUID) erro
 		WHERE id = $1::text::uuid AND status = 'processing'`, id.String())
 	return err
 }
+
+// Retry bildirimi delay sonra yeniden denenmek üzere "pending"e alır. queued_at sıfırlanır; böylece relay,
+// next_attempt_at gelince bildirimi kuyruğa yeniden bırakır. Yeniden deneme zamanlaması RabbitMQ'da değil veritabanında tutulur.
+func (r *NotificationRepository) Retry(ctx context.Context, id uuid.UUID, reason string, delay time.Duration) error {
+	_, err := r.pool.Exec(ctx, `UPDATE notifications
+		SET status = 'pending', queued_at = NULL, next_attempt_at = now() + make_interval(secs => $3),
+		    last_error = $2, updated_at = now()
+		WHERE id = $1::text::uuid AND status = 'processing'`, id.String(), reason, delay.Seconds())
+	return err
+}

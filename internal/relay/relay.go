@@ -31,7 +31,7 @@ type Relay struct {
 // New varsayılanlar: 10 sn'den eski kayıtlar, tek turda en fazla 500 kayıt, 5 sn'de bir kontrol.
 // minAge, API'nin kendi yayınını bitirmesine fırsat verir; relay yalnızca "takılı kalmış" kayıtlara bakar.
 func New(src Source, pub Publisher) *Relay {
-	return &Relay{src: src, pub: pub, minAge: 10 * time.Second, batch: 500, interval: 5 * time.Second}
+	return &Relay{src: src, pub: pub, minAge: 10 * time.Second, batch: 500, interval: 2 * time.Second}
 }
 
 // Run ctx iptal edilene kadar çalışır.
