@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"github.com/grbzemir/notification-system/internal/domain"
 )
 
@@ -15,6 +17,11 @@ const maxIdempotencyKeyLength = 255
 // NotificationService handler'ın çağırdığı iş mantığıdır.
 type NotificationService interface {
 	Create(ctx context.Context, in domain.NewNotification, idempotencyKey string) (*domain.Notification, bool, error)
+	CreateBatch(ctx context.Context, items []domain.NewNotification) (uuid.UUID, int, error)
+	Get(ctx context.Context, id uuid.UUID) (*domain.Notification, error)
+	Cancel(ctx context.Context, id uuid.UUID) (*domain.Notification, error)
+	BatchSummary(ctx context.Context, batchID uuid.UUID) (*domain.BatchSummary, error)
+	List(ctx context.Context, f domain.ListFilter) (*domain.Page, error)
 }
 
 type NotificationHandler struct {
@@ -30,6 +37,15 @@ type createRequest struct {
 	Channel   string `json:"channel"`
 	Content   string `json:"content"`
 	Priority  string `json:"priority"`
+}
+
+func (c createRequest) toDomain() domain.NewNotification {
+	return domain.NewNotification{
+		Recipient: c.Recipient,
+		Channel:   domain.Channel(c.Channel),
+		Content:   c.Content,
+		Priority:  domain.Priority(c.Priority),
+	}
 }
 
 // Create POST /api/v1/notifications
@@ -51,12 +67,7 @@ func (h *NotificationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n, created, err := h.svc.Create(r.Context(), domain.NewNotification{
-		Recipient: req.Recipient,
-		Channel:   domain.Channel(req.Channel),
-		Content:   req.Content,
-		Priority:  domain.Priority(req.Priority),
-	}, key)
+	n, created, err := h.svc.Create(r.Context(), req.toDomain(), key)
 	if err != nil {
 		h.handleError(w, err)
 		return
@@ -70,15 +81,20 @@ func (h *NotificationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, n)
 }
 
+// handleError servis katmanından gelen hataları HTTP cevabına çevirir.
 func (h *NotificationHandler) handleError(w http.ResponseWriter, err error) {
 	var verr *domain.ValidationError
 	switch {
 	case errors.As(err, &verr):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "one or more fields are invalid", verr.Errors)
-	case errors.Is(err, domain.ErrIdempotencyConflict):
-		writeError(w, http.StatusConflict, "idempotency_conflict", err.Error(), nil)
+	case errors.Is(err, domain.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
+	case errors.Is(err, domain.ErrNotCancellable), errors.Is(err, domain.ErrIdempotencyConflict):
+		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)
+	case errors.Is(err, domain.ErrInvalidCursor):
+		writeError(w, http.StatusBadRequest, "invalid_cursor", err.Error(), nil)
 	default:
-		slog.Error("create notification", "error", err)
+		slog.Error("request failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error", nil)
 	}
 }

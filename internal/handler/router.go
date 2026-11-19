@@ -14,6 +14,11 @@ func NewRouter(nh *NotificationHandler) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/notifications", nh.Create)
+		r.Post("/notifications/batch", nh.CreateBatch)
+		r.Get("/notifications", nh.List)
+		r.Get("/notifications/{id}", nh.Get)
+		r.Post("/notifications/{id}/cancel", nh.Cancel)
+		r.Get("/batches/{id}", nh.GetBatch)
 	})
 	return r
 }
