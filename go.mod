@@ -7,6 +7,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0
+	github.com/rabbitmq/amqp091-go v1.17.0
 	github.com/redis/go-redis/v9 v9.23.0
 )
 
