@@ -15,7 +15,9 @@ import (
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/queue"
 	"github.com/grbzemir/notification-system/internal/ratelimit"
+	"github.com/grbzemir/notification-system/internal/relay"
 	"github.com/grbzemir/notification-system/internal/repository"
+	"github.com/grbzemir/notification-system/internal/retry"
 	"github.com/grbzemir/notification-system/internal/worker"
 )
 
@@ -52,10 +54,18 @@ func run() error {
 	}
 	defer rdb.Close()
 
+	// Relay'in yeniden denemesi zamanı gelen bildirimleri kuyruğa bırakabilmesi için yayıncı gerekir.
+	pub, err := queue.NewPublisher(ctx, cfg.RabbitMQURL)
+	if err != nil {
+		return err
+	}
+	defer pub.Close()
+
 	repo := repository.NewNotificationRepository(pool)
 	client := provider.NewClient(cfg.ProviderURL, cfg.ProviderTimeout)
 	limiter := ratelimit.New(ratelimit.NewRedisBackend(rdb, cfg.RateLimitPerSec))
-	proc := worker.NewProcessor(repo, client, limiter, cfg.Lease)
+	policy := retry.Policy{MaxAttempts: cfg.RetryMaxAttempts, Base: cfg.RetryBase, Max: cfg.RetryMax}
+	proc := worker.NewProcessor(repo, client, limiter, policy, cfg.Lease)
 
 	handler := func(ctx context.Context, m queue.Message) error {
 		id, err := uuid.Parse(m.ID) // DecodeMessage zaten doğruladı
@@ -66,10 +76,19 @@ func run() error {
 	}
 
 	slog.Info("worker starting", "concurrency", cfg.Concurrency, "rate_limit_per_sec", cfg.RateLimitPerSec,
-		"provider", cfg.ProviderURL)
+		"provider", cfg.ProviderURL, "retry_max_attempts", cfg.RetryMaxAttempts,
+		"retry_base", cfg.RetryBase.String(), "retry_max", cfg.RetryMax.String())
+
+	var wg sync.WaitGroup
+
+	// Zamanı gelen yeniden denemeleri kuyruğa bırakır. API'deki relay ile aynı anda çalışabilir (SKIP LOCKED).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		relay.New(repo, pub).Run(ctx)
+	}()
 
 	// Her kanal kendi kuyruğunu kendi tüketicisiyle dinler: yavaş bir kanal diğerlerini yavaşlatmaz.
-	var wg sync.WaitGroup
 	for _, ch := range domain.Channels {
 		wg.Add(1)
 		go func() {
