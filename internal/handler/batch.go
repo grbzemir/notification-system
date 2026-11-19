@@ -26,6 +26,13 @@ func (h *NotificationHandler) CreateBatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	for i := range req.Notifications {
+		if err := h.resolveContent(r.Context(), &req.Notifications[i]); err != nil {
+			h.handleError(w, prefixFields(err, i))
+			return
+		}
+	}
+
 	items := make([]domain.NewNotification, len(req.Notifications))
 	for i, c := range req.Notifications {
 		items[i] = c.toDomain()

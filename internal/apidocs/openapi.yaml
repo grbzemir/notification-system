@@ -15,6 +15,7 @@ servers:
 tags:
   - name: Notifications
   - name: Batches
+  - name: Templates
 paths:
   /notifications:
     post:
@@ -187,6 +188,76 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
         '500': { $ref: '#/components/responses/InternalError' }
+  /templates:
+    post:
+      tags: [Templates]
+      summary: Şablon oluştur
+      description: |
+        Gövdede `{{degisken}}` biçiminde yer tutucular kullanılır (harf, rakam, alt çizgi). Aynı adla ikinci şablon `409` döner.
+        Şablondan bildirim göndermek için `POST /notifications` isteğine `template_id` ve `variables` verilir.
+      operationId: createTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTemplateRequest' }
+            example: { name: otp-sms, body: "Merhaba {{name}}, doğrulama kodunuz: {{code}}" }
+      responses:
+        '201':
+          description: Şablon oluşturuldu.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    get:
+      tags: [Templates]
+      summary: Şablonları listele
+      description: Şablonları ada göre sıralı döner (en fazla 200).
+      operationId: listTemplates
+      responses:
+        '200':
+          description: Şablon listesi.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Template' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /templates/{id}:
+    get:
+      tags: [Templates]
+      summary: Şablonu getir
+      operationId: getTemplate
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Şablon.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [Templates]
+      summary: Şablonu sil
+      description: Bu şablondan daha önce üretilmiş bildirimler etkilenmez (içerik bildirime yazılmıştır).
+      operationId: deleteTemplate
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '204': { description: Silindi. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
 components:
   parameters:
     Id:
@@ -214,7 +285,7 @@ components:
     CreateNotificationRequest:
       type: object
       additionalProperties: false
-      required: [recipient, channel, content]
+      required: [recipient, channel]
       properties:
         recipient:
           type: string
@@ -223,7 +294,18 @@ components:
         channel: { $ref: '#/components/schemas/Channel' }
         content:
           type: string
-          description: "En fazla karakter sayısı: SMS 160, push 256, e-posta 10000."
+          description: |
+            Bildirim metni. En fazla karakter sayısı: SMS 160, push 256, e-posta 10000.
+            `template_id` verilmişse **verilmemelidir**; yoksa zorunludur.
+        template_id:
+          type: string
+          format: uuid
+          description: Verilirse içerik bu şablondan üretilir. Şablon yoksa `422` (`template_id`).
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          description: Şablondaki `{{ad}}` yer tutucularının değerleri. Eksik değişken `422` (`variables.ad`) döner; fazlalar yok sayılır.
+          example: { name: Ada, code: "482913" }
         priority: { $ref: '#/components/schemas/Priority' }
         scheduled_at:
           type: string
@@ -307,6 +389,26 @@ components:
             fields:
               type: array
               items: { $ref: '#/components/schemas/FieldError' }
+    CreateTemplateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, body]
+      properties:
+        name: { type: string, maxLength: 100, description: Benzersiz şablon adı. }
+        body: { type: string, maxLength: 10000, description: "`{{degisken}}` yer tutucuları içeren metin." }
+    Template:
+      type: object
+      required: [id, name, body, variables, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        body: { type: string }
+        variables:
+          type: array
+          items: { type: string }
+          description: Gövdedeki yer tutucu adları (gövdeden türetilir).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
   responses:
     BadRequest:
       description: Geçersiz istek (bozuk JSON, geçersiz UUID, bozuk cursor, çok uzun Idempotency-Key).

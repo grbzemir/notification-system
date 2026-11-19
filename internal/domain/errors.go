@@ -8,4 +8,6 @@ var (
 	ErrNotCancellable      = errors.New("notification can no longer be cancelled")
 	ErrDuplicateKey        = errors.New("idempotency key already used")
 	ErrIdempotencyConflict = errors.New("idempotency key was already used with a different request")
+	ErrTemplateNotFound    = errors.New("template not found")
+	ErrTemplateNameTaken   = errors.New("a template with this name already exists")
 )

@@ -67,14 +67,16 @@ func run() error {
 	repo := repository.NewNotificationRepository(pool)
 	idem := repository.NewIdempotencyStore(rdb, idempotencyTTL)
 	svc := service.NewNotificationService(repo, idem, service.WithPublisher(pub))
-	nh := handler.NewNotificationHandler(svc)
+	tplSvc := service.NewTemplateService(repository.NewTemplateRepository(pool))
+	nh := handler.NewNotificationHandler(svc).WithTemplates(tplSvc)
+	th := handler.NewTemplateHandler(tplSvc)
 
 	// Kuyruğa bırakılamamış bildirimleri arka planda yeniden yayınlar. ctx iptal olunca durur.
 	go relay.New(repo, pub).Run(ctx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           handler.NewRouter(nh),
+		Handler:           handler.NewRouter(nh, th),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

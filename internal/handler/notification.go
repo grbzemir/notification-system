@@ -26,11 +26,18 @@ type NotificationService interface {
 }
 
 type NotificationHandler struct {
-	svc NotificationService
+	svc       NotificationService
+	templates TemplateRenderer // isteğe bağlı; nil ise template_id desteklenmez
 }
 
 func NewNotificationHandler(svc NotificationService) *NotificationHandler {
 	return &NotificationHandler{svc: svc}
+}
+
+// WithTemplates şablondan bildirim oluşturmayı (template_id + variables) etkinleştirir.
+func (h *NotificationHandler) WithTemplates(r TemplateRenderer) *NotificationHandler {
+	h.templates = r
+	return h
 }
 
 type createRequest struct {
@@ -40,6 +47,10 @@ type createRequest struct {
 	Priority  string `json:"priority"`
 
 	ScheduledAt *time.Time `json:"scheduled_at"`
+
+	// content yerine şablon kullanmak için: şablon kimliği ve yer tutucu değerleri.
+	TemplateID *uuid.UUID        `json:"template_id"`
+	Variables  map[string]string `json:"variables"`
 }
 
 func (c createRequest) toDomain() domain.NewNotification {
@@ -72,6 +83,11 @@ func (h *NotificationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.resolveContent(r.Context(), &req); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
 	n, created, err := h.svc.Create(r.Context(), req.toDomain(), key)
 	if err != nil {
 		h.handleError(w, err)
@@ -88,13 +104,18 @@ func (h *NotificationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // handleError servis katmanından gelen hataları HTTP cevabına çevirir.
 func (h *NotificationHandler) handleError(w http.ResponseWriter, err error) {
+	writeServiceError(w, err)
+}
+
+// writeServiceError servis/domain hatalarını HTTP yanıtına çevirir (bildirim ve şablon handler'ları ortak kullanır).
+func writeServiceError(w http.ResponseWriter, err error) {
 	var verr *domain.ValidationError
 	switch {
 	case errors.As(err, &verr):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", "one or more fields are invalid", verr.Errors)
-	case errors.Is(err, domain.ErrNotFound):
+	case errors.Is(err, domain.ErrNotFound), errors.Is(err, domain.ErrTemplateNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
-	case errors.Is(err, domain.ErrNotCancellable), errors.Is(err, domain.ErrIdempotencyConflict):
+	case errors.Is(err, domain.ErrNotCancellable), errors.Is(err, domain.ErrIdempotencyConflict), errors.Is(err, domain.ErrTemplateNameTaken):
 		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)
 	case errors.Is(err, domain.ErrInvalidCursor):
 		writeError(w, http.StatusBadRequest, "invalid_cursor", err.Error(), nil)

@@ -10,7 +10,7 @@ import (
 )
 
 // NewRouter tüm endpoint'leri tek bir http.Handler'da toplar.
-func NewRouter(nh *NotificationHandler) http.Handler {
+func NewRouter(nh *NotificationHandler, th *TemplateHandler) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer) // handler içinde panic olursa sunucu çökmesin, 500 dönsün
 
@@ -24,6 +24,11 @@ func NewRouter(nh *NotificationHandler) http.Handler {
 		r.Get("/notifications/{id}", nh.Get)
 		r.Post("/notifications/{id}/cancel", nh.Cancel)
 		r.Get("/batches/{id}", nh.GetBatch)
+
+		r.Post("/templates", th.Create)
+		r.Get("/templates", th.List)
+		r.Get("/templates/{id}", th.Get)
+		r.Delete("/templates/{id}", th.Delete)
 	})
 	return r
 }
