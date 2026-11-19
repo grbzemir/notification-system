@@ -11,7 +11,12 @@ import (
 )
 
 // ID listesini uuid[] olarak karşılaştırıyoruz: $1 metin dizisi gelir, SQL içinde uuid dizisine çevrilir.
-const markQueuedSQL = `UPDATE notifications SET queued_at = now() WHERE id = ANY($1::text[]::uuid[])`
+// API yayin sonrasi isareti. next_attempt_at doluysa (worker bu arada Retry ile yeniden denemeye aldiysa) dokunmaz;
+// aksi halde gec kalan bu isaret Retry nin NULL yaptigi queued_at i yeniden doldurup relay in satiri gormesini engellerdi.
+const markQueuedSQL = `UPDATE notifications SET queued_at = now() WHERE id = ANY($1::text[]::uuid[]) AND next_attempt_at IS NULL`
+
+// Relay isareti: satir FOR UPDATE ile kilitli oldugu icin kosulsuz isaretler.
+const relayMarkQueuedSQL = `UPDATE notifications SET queued_at = now() WHERE id = ANY($1::text[]::uuid[])`
 
 func idStrings(ids []uuid.UUID) []string {
 	out := make([]string, len(ids))
@@ -62,7 +67,7 @@ func (r *NotificationRepository) PublishUnqueued(ctx context.Context, minAge tim
 	for i, n := range items {
 		ids[i] = n.ID
 	}
-	if _, err := tx.Exec(ctx, markQueuedSQL, idStrings(ids)); err != nil {
+	if _, err := tx.Exec(ctx, relayMarkQueuedSQL, idStrings(ids)); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
