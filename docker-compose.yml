@@ -1,3 +1,21 @@
+# Tek komut:  docker compose up --build
+# API:        http://localhost:8080/api/v1/notifications
+# RabbitMQ:   http://localhost:15672 (guest/guest)
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://notif:notif@postgres:5432/notifications?sslmode=disable
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  REDIS_ADDR: redis:6379
+  PROVIDER_URL: http://mockprovider:9090/
+
+x-app-deps: &app-deps
+  postgres:
+    condition: service_healthy
+  rabbitmq:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -30,6 +48,43 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  mockprovider:
+    build:
+      context: .
+      args: { SERVICE: mockprovider }
+    ports: ["9090:9090"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      args: { SERVICE: api }
+    environment: *app-env
+    depends_on: *app-deps
+    ports: ["8080:8080"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/notifications?limit=1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      args: { SERVICE: worker }
+    environment: *app-env
+    depends_on:
+      <<: *app-deps
+      mockprovider:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
