@@ -22,7 +22,7 @@ func (r *NotificationRepository) Claim(ctx context.Context, id uuid.UUID, lease 
 		RETURNING ` + notificationColumns
 
 	n, err := scanNotification(r.pool.QueryRow(ctx, q, id.String(), lease.Seconds()))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, domain.ErrNotFound) {
 		return nil, domain.ErrNotClaimable
 	}
 	return n, err
