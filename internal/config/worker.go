@@ -21,6 +21,9 @@ type Worker struct {
 	RetryMaxAttempts int           // ilk deneme dahil toplam deneme sayısı
 	RetryBase        time.Duration // ilk başarısızlıktan sonraki bekleme üst sınırı
 	RetryMax         time.Duration // bekleme tavanı
+
+	CircuitFailureThreshold int           // bir kanalda bu kadar ardışık sağlayıcı hatası devreyi açar
+	CircuitOpenTimeout      time.Duration // devre açık kaldıktan sonra tek deneme isteğine izin verilene kadar geçen süre
 }
 
 func LoadWorker() Worker {
@@ -37,6 +40,9 @@ func LoadWorker() Worker {
 		RetryMaxAttempts: positiveInt("RETRY_MAX_ATTEMPTS", 5),
 		RetryBase:        time.Duration(positiveInt("RETRY_BASE_MS", 5000)) * time.Millisecond,
 		RetryMax:         time.Duration(positiveInt("RETRY_MAX_MS", 300000)) * time.Millisecond,
+
+		CircuitFailureThreshold: positiveInt("CB_FAILURE_THRESHOLD", 5),
+		CircuitOpenTimeout:      time.Duration(positiveInt("CB_OPEN_TIMEOUT_MS", 30000)) * time.Millisecond,
 	}
 }
 

@@ -52,6 +52,16 @@ func (r *NotificationRepository) Release(ctx context.Context, id uuid.UUID) erro
 	return err
 }
 
+// Defer gönderim denenmeden bildirimi delay sonraya erteler: pending + kuyruğa bırakılmamış sayılır (relay yeniden yayınlar)
+// ve Claim'in artırdığı deneme sayısı geri alınır. Sağlayıcı kesintisi (devre kesici açık) deneme hakkını tüketmez.
+func (r *NotificationRepository) Defer(ctx context.Context, id uuid.UUID, delay time.Duration) error {
+	_, err := r.pool.Exec(ctx, `UPDATE notifications
+		SET status = 'pending', attempts = GREATEST(attempts - 1, 0), queued_at = NULL,
+		    next_attempt_at = now() + make_interval(secs => $2), updated_at = now()
+		WHERE id = $1::text::uuid AND status = 'processing'`, id.String(), delay.Seconds())
+	return err
+}
+
 // Retry bildirimi delay sonra yeniden denenmek üzere "pending"e alır. queued_at sıfırlanır; böylece relay,
 // next_attempt_at gelince bildirimi kuyruğa yeniden bırakır. Yeniden deneme zamanlaması RabbitMQ'da değil veritabanında tutulur.
 func (r *NotificationRepository) Retry(ctx context.Context, id uuid.UUID, reason string, delay time.Duration) error {

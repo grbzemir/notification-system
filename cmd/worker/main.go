@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/config"
 	"github.com/grbzemir/notification-system/internal/domain"
 	"github.com/grbzemir/notification-system/internal/provider"
@@ -62,7 +63,10 @@ func run() error {
 	defer pub.Close()
 
 	repo := repository.NewNotificationRepository(pool)
-	client := provider.NewClient(cfg.ProviderURL, cfg.ProviderTimeout)
+	client := circuitbreaker.NewSender(
+		provider.NewClient(cfg.ProviderURL, cfg.ProviderTimeout),
+		circuitbreaker.Config{FailureThreshold: cfg.CircuitFailureThreshold, OpenTimeout: cfg.CircuitOpenTimeout},
+	)
 	limiter := ratelimit.New(ratelimit.NewRedisBackend(rdb, cfg.RateLimitPerSec))
 	policy := retry.Policy{MaxAttempts: cfg.RetryMaxAttempts, Base: cfg.RetryBase, Max: cfg.RetryMax}
 	proc := worker.NewProcessor(repo, client, limiter, policy, cfg.Lease)
@@ -77,7 +81,8 @@ func run() error {
 
 	slog.Info("worker starting", "concurrency", cfg.Concurrency, "rate_limit_per_sec", cfg.RateLimitPerSec,
 		"provider", cfg.ProviderURL, "retry_max_attempts", cfg.RetryMaxAttempts,
-		"retry_base", cfg.RetryBase.String(), "retry_max", cfg.RetryMax.String())
+		"retry_base", cfg.RetryBase.String(), "retry_max", cfg.RetryMax.String(),
+		"circuit_failure_threshold", cfg.CircuitFailureThreshold, "circuit_open_timeout", cfg.CircuitOpenTimeout.String())
 
 	var wg sync.WaitGroup
 

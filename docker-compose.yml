@@ -7,6 +7,8 @@ x-app-env: &app-env
   RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
   REDIS_ADDR: redis:6379
   PROVIDER_URL: http://mockprovider:9090/
+  CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
+  CB_OPEN_TIMEOUT_MS: ${CB_OPEN_TIMEOUT_MS:-30000}
 
 x-app-deps: &app-deps
   postgres:

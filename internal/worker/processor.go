@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/domain"
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/retry"
@@ -23,6 +24,9 @@ type Store interface {
 	MarkFailed(ctx context.Context, id uuid.UUID, reason string) error
 	// Retry bildirimi delay sonra yeniden denenmek üzere "pending"e alır ve kuyruğa bırakılmamış sayar (relay yeniden yayınlar).
 	Retry(ctx context.Context, id uuid.UUID, reason string, delay time.Duration) error
+	// Defer bildirimi delay sonra yeniden denenmek üzere "pending"e alır ve Claim'in artırdığı deneme sayısını geri alır.
+	// Gönderim hiç denenmediğinde (devre kesici açık) kullanılır: sağlayıcı kesintisi deneme hakkı harcamamalı.
+	Defer(ctx context.Context, id uuid.UUID, delay time.Duration) error
 	// Release sahiplenmeyi geri bırakır (processing -> pending), gönderim yapılmadığında kullanılır.
 	Release(ctx context.Context, id uuid.UUID) error
 }
@@ -93,6 +97,9 @@ func (p *Processor) Process(ctx context.Context, id uuid.UUID) error {
 //
 // Üçünde de nil dönülür (mesaj ack edilir): sonuç veritabanına yazıldı, yeniden deneme artık kuyruğun değil veritabanının işi.
 func (p *Processor) handleSendError(ctx context.Context, n *domain.Notification, err error) error {
+	if errors.Is(err, circuitbreaker.ErrOpen) {
+		return p.deferUntilCircuitCloses(ctx, n, err)
+	}
 	retryable := provider.IsRetryable(err)
 	slog.Warn("provider send failed", "id", n.ID, "channel", n.Channel, "attempt", n.Attempts,
 		"retryable", retryable, "error", err)
@@ -118,6 +125,27 @@ func (p *Processor) handleSendError(ctx context.Context, n *domain.Notification,
 	}
 	slog.Info("retry scheduled", "id", n.ID, "attempt", n.Attempts, "max_attempts", p.policy.MaxAttempts,
 		"delay", delay.Round(time.Millisecond).String())
+	return nil
+}
+
+// minCircuitDefer devre kesici kaynaklı ertelemenin alt sınırı: relay'in tarama aralığından (2 sn) kısa beklemenin anlamı yok.
+const minCircuitDefer = 2 * time.Second
+
+// deferUntilCircuitCloses devre açıkken sağlayıcıya hiç gidilmedi: bildirimi deneme hakkı harcamadan, devrenin
+// yarı açılacağı zamana erteler. Mesaj ack edilir (nil); yeniden yayını veritabanındaki relay yapar.
+func (p *Processor) deferUntilCircuitCloses(ctx context.Context, n *domain.Notification, err error) error {
+	delay := minCircuitDefer
+	var oe *circuitbreaker.OpenError
+	if errors.As(err, &oe) && oe.RetryAfter > delay {
+		delay = oe.RetryAfter
+	}
+
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if derr := p.store.Defer(saveCtx, n.ID, delay); derr != nil {
+		return fmt.Errorf("defer: %w", derr)
+	}
+	slog.Info("circuit open, notification deferred", "id", n.ID, "channel", n.Channel, "delay", delay.Round(time.Millisecond).String())
 	return nil
 }
 

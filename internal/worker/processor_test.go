@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/domain"
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/retry"
@@ -22,6 +23,8 @@ type fakeStore struct {
 	failed     string
 	released   bool
 	retried    bool
+	deferred   bool
+	deferDelay time.Duration
 	retryDelay time.Duration
 	retryWhy   string
 	retryErr   error
@@ -50,6 +53,11 @@ func (s *fakeStore) Retry(_ context.Context, _ uuid.UUID, reason string, d time.
 	s.events = append(s.events, "retry")
 	s.retried, s.retryWhy, s.retryDelay = true, reason, d
 	return s.retryErr
+}
+func (s *fakeStore) Defer(_ context.Context, _ uuid.UUID, d time.Duration) error {
+	s.events = append(s.events, "defer")
+	s.deferred, s.deferDelay = true, d
+	return nil
 }
 func (s *fakeStore) Release(context.Context, uuid.UUID) error {
 	s.events = append(s.events, "release")
@@ -225,5 +233,38 @@ func TestMarkSentFailureRequeues(t *testing.T) {
 	snd := &fakeSender{resp: &provider.Response{MessageID: "m"}}
 	if err := NewProcessor(st, snd, &fakeLimiter{}, testPolicy, time.Minute).Process(context.Background(), st.n.ID); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestOpenCircuitDefersWithoutSpendingAnAttempt(t *testing.T) {
+	st := &fakeStore{n: newN()}
+	open := &circuitbreaker.OpenError{RetryAfter: 20 * time.Second}
+
+	if err := process(st, &fakeSender{err: open}); err != nil {
+		t.Fatalf("deferring is a successful outcome (ack), got %v", err)
+	}
+	if !st.deferred || st.deferDelay != 20*time.Second {
+		t.Fatalf("deferred=%v delay=%v, want deferred for 20s", st.deferred, st.deferDelay)
+	}
+	if st.retried || st.failed != "" || st.sentID != "" || st.released {
+		t.Fatalf("must only defer: retried=%v failed=%q sent=%q released=%v", st.retried, st.failed, st.sentID, st.released)
+	}
+}
+
+func TestOpenCircuitDeferHasMinimumDelay(t *testing.T) {
+	st := &fakeStore{n: newN()}
+	_ = process(st, &fakeSender{err: &circuitbreaker.OpenError{RetryAfter: 100 * time.Millisecond}})
+	if st.deferDelay != minCircuitDefer {
+		t.Fatalf("delay = %v, want %v", st.deferDelay, minCircuitDefer)
+	}
+}
+
+func TestOpenCircuitDeferEvenWhenAttemptsWouldBeExhausted(t *testing.T) {
+	n := newN()
+	n.Attempts = 3 // MaxAttempts: normal bir hata burada failed olurdu
+	st := &fakeStore{n: n}
+	_ = process(st, &fakeSender{err: &circuitbreaker.OpenError{RetryAfter: 5 * time.Second}})
+	if !st.deferred || st.failed != "" {
+		t.Fatalf("outage must not fail notifications: deferred=%v failed=%q", st.deferred, st.failed)
 	}
 }
