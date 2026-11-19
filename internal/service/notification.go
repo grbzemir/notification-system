@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,6 +16,11 @@ type NotificationRepository interface {
 	Create(ctx context.Context, n *domain.Notification) error
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.Notification, error)
 	GetByIdempotencyKey(ctx context.Context, key string) (*domain.Notification, error)
+	CreateBatch(ctx context.Context, items []*domain.Notification) error
+	Cancel(ctx context.Context, id uuid.UUID) (*domain.Notification, error)
+	List(ctx context.Context, f domain.ListFilter) ([]*domain.Notification, error)
+	BatchSummary(ctx context.Context, batchID uuid.UUID) (*domain.BatchSummary, error)
+	MarkQueued(ctx context.Context, ids []uuid.UUID) error
 }
 
 // IdempotencyCache key -> bildirim ID eşlemesini hızlı okumak için kullanılır.
@@ -24,16 +30,38 @@ type IdempotencyCache interface {
 	Set(ctx context.Context, key string, id uuid.UUID) error
 }
 
+// Publisher kaydedilmiş bildirimleri kuyruğa bırakır.
+type Publisher interface {
+	Publish(ctx context.Context, ns []*domain.Notification) error
+}
+
+type noopPublisher struct{}
+
+func (noopPublisher) Publish(context.Context, []*domain.Notification) error { return nil }
+
 type NotificationService struct {
-	repo  NotificationRepository
-	cache IdempotencyCache
+	repo      NotificationRepository
+	cache     IdempotencyCache
+	publisher Publisher
 }
 
-func NewNotificationService(repo NotificationRepository, cache IdempotencyCache) *NotificationService {
-	return &NotificationService{repo: repo, cache: cache}
+// Option NotificationService'i isteğe bağlı bağımlılıklarla yapılandırır (functional options kalıbı).
+type Option func(*NotificationService)
+
+// WithPublisher kuyruğa yayın yapan bileşeni bağlar. Verilmezse yayın yapılmaz (testlerde işe yarar).
+func WithPublisher(p Publisher) Option {
+	return func(s *NotificationService) { s.publisher = p }
 }
 
-// Create isteği doğrular ve bildirimi "pending" olarak kaydeder.
+func NewNotificationService(repo NotificationRepository, cache IdempotencyCache, opts ...Option) *NotificationService {
+	s := &NotificationService{repo: repo, cache: cache, publisher: noopPublisher{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// Create isteği doğrular ve bildirimi "pending" olarak kaydeder, ardından kuyruğa bırakır.
 // idempotencyKey doluysa aynı key ile gelen tekrar istek yeni kayıt açmaz, mevcut kaydı döner.
 // Dönen bool, kaydın bu çağrıda yeni oluşturulup oluşturulmadığını söyler.
 func (s *NotificationService) Create(ctx context.Context, in domain.NewNotification, idempotencyKey string) (*domain.Notification, bool, error) {
@@ -78,7 +106,29 @@ func (s *NotificationService) Create(ctx context.Context, in domain.NewNotificat
 	if idempotencyKey != "" {
 		s.remember(ctx, idempotencyKey, n.ID)
 	}
+	s.enqueue(ctx, n)
 	return n, true, nil
+}
+
+// enqueue kaydedilmiş bildirimleri kuyruğa bırakır ve "kuyruğa bırakıldı" diye işaretler.
+// Başarısız olursa hata DÖNDÜRMEZ: bildirim veritabanında zaten kalıcı olarak "pending" durumdadır
+// ve relay, işaretlenmemiş kayıtları bir süre sonra kuyruğa bırakır.
+func (s *NotificationService) enqueue(ctx context.Context, ns ...*domain.Notification) {
+	if err := s.publisher.Publish(ctx, ns); err != nil {
+		slog.Error("publish failed, relay will retry", "count", len(ns), "error", err)
+		return
+	}
+
+	ids := make([]uuid.UUID, len(ns))
+	for i, n := range ns {
+		ids[i] = n.ID
+	}
+	// Mesaj artık kuyrukta. İstemci bağlantıyı kesip ctx iptal olsa bile işaretleme yapılsın ki mesaj çoğaltılmasın.
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.repo.MarkQueued(markCtx, ids); err != nil {
+		slog.Warn("mark queued failed, relay may publish a duplicate", "error", err)
+	}
 }
 
 // lookupCached cache'te key varsa ve kayıt hâlâ veritabanında duruyorsa kaydı döner.
