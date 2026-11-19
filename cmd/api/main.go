@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/grbzemir/notification-system/internal/config"
+	"github.com/grbzemir/notification-system/internal/handler"
 	"github.com/grbzemir/notification-system/internal/repository"
+	"github.com/grbzemir/notification-system/internal/service"
 )
 
 func main() {
@@ -38,5 +43,34 @@ func run() error {
 	defer pool.Close()
 	slog.Info("database connected")
 
-	return nil
+	// Bağımlılıkları aşağıdan yukarıya bağlıyoruz: repository -> service -> handler.
+	repo := repository.NewNotificationRepository(pool)
+	svc := service.NewNotificationService(repo)
+	nh := handler.NewNotificationHandler(svc)
+
+	srv := &http.Server{
+		Addr:              ":" + cfg.HTTPPort,
+		Handler:           handler.NewRouter(nh),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("http server listening", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		slog.Info("shutdown signal received")
+	case err := <-errCh:
+		return err
+	}
+
+	// Graceful shutdown: yeni istek almayı bırak, yarım kalanları 10 sn içinde bitir.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }
