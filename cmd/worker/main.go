@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/grbzemir/notification-system/internal/relay"
 	"github.com/grbzemir/notification-system/internal/repository"
 	"github.com/grbzemir/notification-system/internal/retry"
+	"github.com/grbzemir/notification-system/internal/telemetry"
 	"github.com/grbzemir/notification-system/internal/worker"
 )
 
@@ -36,6 +38,17 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// İzleme (OTEL_EXPORTER_OTLP_ENDPOINT ayarlıysa açılır). Kapanışta bekleyen span'lar gönderilir.
+	shutdownTracing, err := telemetry.Setup(ctx, "worker")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
 
 	// Önce havuzu aç: NewPool Postgres hazır olana kadar bağlantıyı yeniden dener.
 	pool, err := repository.NewPool(ctx, cfg.DatabaseURL)

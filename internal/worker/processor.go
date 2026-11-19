@@ -9,12 +9,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/grbzemir/notification-system/internal/circuitbreaker"
 	"github.com/grbzemir/notification-system/internal/domain"
 	"github.com/grbzemir/notification-system/internal/events"
 	"github.com/grbzemir/notification-system/internal/provider"
 	"github.com/grbzemir/notification-system/internal/retry"
+	"github.com/grbzemir/notification-system/internal/telemetry"
 )
 
 // Store worker'ın veritabanından ihtiyaç duyduğu işlemler.
@@ -93,7 +96,18 @@ func (p *Processor) Process(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("rate limit: %w", err)
 	}
 
-	resp, err := p.sender.Send(ctx, provider.Request{To: n.Recipient, Channel: string(n.Channel), Content: n.Content})
+	sendCtx, span := telemetry.Start(ctx, "provider.send",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("notification.id", n.ID.String()),
+			attribute.String("notification.channel", string(n.Channel)),
+			attribute.Int("notification.attempt", n.Attempts),
+		))
+	resp, err := p.sender.Send(sendCtx, provider.Request{To: n.Recipient, Channel: string(n.Channel), Content: n.Content})
+	if err != nil {
+		telemetry.RecordError(span, err)
+	}
+	span.End()
 	if err != nil {
 		return p.handleSendError(ctx, n, err)
 	}

@@ -10,8 +10,11 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/telemetry"
 )
 
 const (
@@ -126,7 +129,19 @@ func (c *Consumer) handle(ctx context.Context, d amqp.Delivery) {
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), handlerTimeout)
 	defer cancel()
 
+	// API'de başlayan iz mesaj başlıklarından devralınır; bu span, worker tarafındaki işin kökü olur.
+	hctx = extractContext(hctx, d.Headers)
+	hctx, span := telemetry.Start(hctx, "process "+string(msg.Channel),
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("messaging.destination.name", QueueName(c.channel)),
+			attribute.String("notification.id", msg.ID),
+		))
+	defer span.End()
+
 	if err := c.handler(hctx, msg); err != nil {
+		telemetry.RecordError(span, err)
 		slog.Error("handler failed, requeueing", "id", msg.ID, "channel", msg.Channel, "error", err)
 		// Kısa bekleme: altyapı sorunu sürerken aynı mesajı saniyede binlerce kez işleme döngüsünü önler.
 		select {

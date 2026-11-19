@@ -9,6 +9,7 @@ x-app-env: &app-env
   PROVIDER_URL: http://mockprovider:9090/
   CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
   CB_OPEN_TIMEOUT_MS: ${CB_OPEN_TIMEOUT_MS:-30000}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318   # boş bırakılırsa izleme kapanır
 
 x-app-deps: &app-deps
   postgres:
@@ -62,6 +63,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Dağıtık izleme arayüzü: http://localhost:16686  (OTLP/HTTP alıcısı :4318)
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["16686:16686"]
+    restart: unless-stopped
 
   api:
     build:

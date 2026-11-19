@@ -16,7 +16,7 @@ const (
 	pgUniqueViolation      = "23505"
 	idempotencyUniqueIndex = "uq_notifications_idempotency_key"
 	notificationColumns    = `id::text, batch_id::text, idempotency_key, recipient, channel, content,
-		priority, status, attempts, last_error, provider_message_id, scheduled_at, sent_at, created_at, updated_at`
+		priority, status, attempts, last_error, provider_message_id, scheduled_at, sent_at, created_at, updated_at, traceparent`
 )
 
 // NotificationRepository bildirimleri PostgreSQL'de saklar.
@@ -31,12 +31,12 @@ func NewNotificationRepository(pool *pgxpool.Pool) *NotificationRepository {
 // Create bildirimi ekler. İdempotency key daha önce kullanılmışsa domain.ErrDuplicateKey döner.
 func (r *NotificationRepository) Create(ctx context.Context, n *domain.Notification) error {
 	const q = `
-		INSERT INTO notifications (id, idempotency_key, recipient, channel, content, priority, status, scheduled_at, next_attempt_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+		INSERT INTO notifications (id, idempotency_key, recipient, channel, content, priority, status, scheduled_at, next_attempt_at, traceparent)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9)
 		RETURNING attempts, created_at, updated_at`
 
 	err := r.pool.QueryRow(ctx, q,
-		n.ID.String(), n.IdempotencyKey, n.Recipient, string(n.Channel), n.Content, string(n.Priority), string(n.Status), n.ScheduledAt,
+		n.ID.String(), n.IdempotencyKey, n.Recipient, string(n.Channel), n.Content, string(n.Priority), string(n.Status), n.ScheduledAt, n.Traceparent,
 	).Scan(&n.Attempts, &n.CreatedAt, &n.UpdatedAt)
 
 	var pgErr *pgconn.PgError
@@ -71,7 +71,7 @@ func scanNotification(row rowScanner) (*domain.Notification, error) {
 	)
 	err := row.Scan(&id, &batchID, &n.IdempotencyKey, &n.Recipient, &channel, &n.Content,
 		&priority, &status, &n.Attempts, &n.LastError, &n.ProviderMessageID,
-		&n.ScheduledAt, &n.SentAt, &n.CreatedAt, &n.UpdatedAt)
+		&n.ScheduledAt, &n.SentAt, &n.CreatedAt, &n.UpdatedAt, &n.Traceparent)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrNotFound

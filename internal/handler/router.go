@@ -12,6 +12,7 @@ import (
 // NewRouter tüm endpoint'leri tek bir http.Handler'da toplar.
 func NewRouter(nh *NotificationHandler, th *TemplateHandler, wh *WSHandler) http.Handler {
 	r := chi.NewRouter()
+	r.Use(Trace)                // en dışta: panic sonrası 500 de izde görünsün
 	r.Use(middleware.Recoverer) // handler içinde panic olursa sunucu çökmesin, 500 dönsün
 
 	r.Get("/openapi.yaml", apidocs.Spec) // API şeması

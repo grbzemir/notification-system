@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/grbzemir/notification-system/internal/domain"
 	"github.com/grbzemir/notification-system/internal/events"
+	"github.com/grbzemir/notification-system/internal/telemetry"
 )
 
 // NotificationRepository service'in ihtiyaç duyduğu saklama işlemleridir.
@@ -76,6 +78,9 @@ func (s *NotificationService) Create(ctx context.Context, in domain.NewNotificat
 		return nil, false, err
 	}
 
+	ctx, span := telemetry.Start(ctx, "NotificationService.Create")
+	defer span.End()
+
 	if idempotencyKey != "" {
 		// Hızlı yol: key daha önce görüldüyse veritabanına insert denemeden cevap ver.
 		if existing, err := s.lookupCached(ctx, idempotencyKey); err != nil {
@@ -94,7 +99,16 @@ func (s *NotificationService) Create(ctx context.Context, in domain.NewNotificat
 		Status:    initialStatus(in),
 
 		ScheduledAt: in.ScheduledAt,
+
+		// İz bağlamı bildirimle saklanır: kuyruğa relay bırakırsa ya da yeniden deneme olursa iz aynı kalır.
+		Traceparent: telemetry.Traceparent(ctx),
 	}
+	span.SetAttributes(
+		attribute.String("notification.id", n.ID.String()),
+		attribute.String("notification.channel", string(n.Channel)),
+		attribute.String("notification.priority", string(n.Priority)),
+		attribute.String("notification.status", string(n.Status)),
+	)
 	if idempotencyKey != "" {
 		n.IdempotencyKey = &idempotencyKey
 	}
@@ -109,6 +123,7 @@ func (s *NotificationService) Create(ctx context.Context, in domain.NewNotificat
 			s.remember(ctx, idempotencyKey, existing.ID)
 			return replay(existing, in)
 		}
+		telemetry.RecordError(span, err)
 		return nil, false, err
 	}
 

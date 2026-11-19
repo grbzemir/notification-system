@@ -9,7 +9,11 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/grbzemir/notification-system/internal/domain"
+	"github.com/grbzemir/notification-system/internal/telemetry"
 )
 
 const dialTimeout = 3 * time.Second
@@ -137,8 +141,19 @@ func (p *Publisher) Publish(ctx context.Context, ns []*domain.Notification) erro
 		if err != nil {
 			return fmt.Errorf("encode message: %w", err)
 		}
+		// Her mesaj kendi span'ını alır; ebeveyn bildirimin oluşturulduğu istektir. Relay/yeniden deneme yolunda
+		// ctx'te iz yoktur, bu yüzden veritabanında saklanan traceparent kullanılır.
+		pctx := telemetry.ContextWithTraceparent(ctx, n.Traceparent)
+		pctx, span := telemetry.Start(pctx, "publish "+string(n.Channel),
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "rabbitmq"),
+				attribute.String("messaging.destination.name", ExchangeName),
+				attribute.String("notification.id", n.ID.String()),
+			))
 		dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, ExchangeName, string(n.Channel), false, false,
 			amqp.Publishing{
+				Headers:      injectHeaders(pctx), // iz bağlamı mesajla birlikte worker'a taşınır
 				ContentType:  "application/json",
 				DeliveryMode: amqp.Persistent, // diske yazılsın, broker yeniden başlasa da kaybolmasın
 				Priority:     PriorityValue(n.Priority),
@@ -147,9 +162,12 @@ func (p *Publisher) Publish(ctx context.Context, ns []*domain.Notification) erro
 				Body:         body,
 			})
 		if err != nil {
+			telemetry.RecordError(span, err)
+			span.End()
 			p.reset()
 			return fmt.Errorf("publish: %w", err)
 		}
+		span.End()
 		confirms = append(confirms, dc)
 	}
 

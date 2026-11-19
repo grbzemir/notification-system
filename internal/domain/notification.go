@@ -86,4 +86,8 @@ type Notification struct {
 	SentAt            *time.Time `json:"sent_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
+
+	// Traceparent bildirimin oluşturulduğu isteğin W3C iz bağlamıdır (API yanıtına girmez). Kuyruk, relay ve yeniden
+	// denemeler boyunca aynı izin sürdürülmesini sağlar.
+	Traceparent string `json:"-"`
 }
