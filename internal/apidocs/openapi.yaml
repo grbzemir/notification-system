@@ -1,0 +1,209 @@
+openapi: 3.0.3
+info:
+  title: Notification System API
+  version: 1.0.0
+  description: |
+    Event-driven bildirim sistemi. Bildirimler SMS, e-posta ve push kanallarından gönderilir.
+
+    **Akış:** istek kaydedilir (`pending`) ve RabbitMQ kuyruğuna bırakılır; worker kanal başına hız sınırı
+    (100/sn) altında sağlayıcıya gönderir. Geçici hatalar üstel geri çekilmeyle en fazla 5 kez denenir.
+
+    **Durumlar:** `pending` → `processing` → `sent` | `failed`. `pending` (retry bekleyenler dahil) iptal edilebilir → `cancelled`.
+servers:
+  - url: /api/v1
+tags:
+  - name: Notifications
+  - name: Batches
+paths:
+  /notifications:
+    post:
+      tags: [Notifications]
+      summary: Bildirim oluştur
+      description: |
+        Tek bir bildirim oluşturur ve kuyruğa bırakır. `Idempotency-Key` başlığı verilirse aynı anahtarla tekrarlanan istek
+        yeni kayıt oluşturmaz: aynı gövdeyle `200` ve `Idempotent-Replayed: true` ile ilk kayıt döner, farklı gövdeyle `409`.
+      operationId: createNotification
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotificationRequest'
+            examples:
+              sms:
+                summary: SMS
+                value: { recipient: "+905551234567", channel: sms, content: "Doğrulama kodunuz 4821", priority: high }
+              email:
+                summary: E-posta
+                value: { recipient: "ada@example.com", channel: email, content: "Siparişiniz yola çıktı." }
+              push:
+                summary: Push
+                value: { recipient: "device-token-abcdef123456", channel: push, content: "Yeni mesajınız var", priority: low }
+      responses:
+        '201':
+          description: Bildirim oluşturuldu ve kuyruğa alındı.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '200':
+          description: Aynı `Idempotency-Key` ve aynı gövde; daha önce oluşturulan kayıt döner.
+          headers:
+            Idempotent-Replayed:
+              description: Yanıtın daha önceki bir isteğin tekrarı olduğunu belirtir.
+              schema: { type: string, enum: ["true"] }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    get:
+      tags: [Notifications]
+      summary: Bildirimleri listele
+      description: |
+        Yeniden eskiye (`created_at`, `id` azalan) sıralı, cursor tabanlı sayfalama. Sonraki sayfa için yanıttaki
+        `next_cursor` değeri `cursor` parametresine verilir; `next_cursor` yoksa son sayfadır.
+      operationId: listNotifications
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/Status' }
+        - name: channel
+          in: query
+          schema: { $ref: '#/components/schemas/Channel' }
+        - name: batch_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          description: "`created_at >= from` (RFC 3339)."
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: "`created_at <= to` (RFC 3339)."
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          description: Sayfa başına kayıt sayısı. Varsayılan 20, en fazla 100.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: Önceki yanıttaki `next_cursor` (opak değer).
+          schema: { type: string }
+      responses:
+        '200':
+          description: Sayfa.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /notifications/batch:
+    post:
+      tags: [Notifications]
+      summary: Toplu bildirim oluştur
+      description: |
+        En fazla 1000 bildirimi **atomik** olarak oluşturur: tek bir öğe geçersizse hiçbiri kaydedilmez (`422`,
+        hatalı öğeler `notifications[i].alan` biçiminde listelenir).
+      operationId: createBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchRequest' }
+            example:
+              notifications:
+                - { recipient: "+905551234567", channel: sms, content: "Kampanya başladı" }
+                - { recipient: "ada@example.com", channel: email, content: "Kampanya başladı", priority: low }
+      responses:
+        '201':
+          description: Tüm bildirimler oluşturuldu.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /notifications/{id}:
+    get:
+      tags: [Notifications]
+      summary: Bildirim durumunu getir
+      operationId: getNotification
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Bildirim.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /notifications/{id}/cancel:
+    post:
+      tags: [Notifications]
+      summary: Bildirimi iptal et
+      description: |
+        Yalnızca henüz gönderilmemiş (`pending`, retry bekleyenler dahil) bildirimler iptal edilir. Zaten iptal edilmiş
+        bildirim için işlem idempotenttir (`200`). Gönderilmiş (`sent`), başarısız (`failed`) ya da işlenmekte olan
+        (`processing`) bildirim için `409` döner.
+      operationId: cancelNotification
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Bildirim iptal edildi (ya da zaten iptal edilmişti).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /batches/{id}:
+    get:
+      tags: [Batches]
+      summary: Toplu gönderim özeti
+      description: Batch içindeki bildirimlerin duruma göre sayısını verir.
+      operationId: getBatch
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Batch özeti.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchSummary' }
+              example:
+                batch_id: 3f6c1c52-8c37-4a0b-8b43-0d6c8d1a9e11
+                total: 1000
+                status_counts: { sent: 940, failed: 3, pending: 57 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: İstemcinin seçtiği benzersiz anahtar (en fazla 255 karakter). Tekrarlanan isteklerin çift kayıt oluşturmasını önler.
+      schema: { type: string, maxLength: 255 }
+  schemas:
+    Channel:
+      type: string
+      enum: [sms, email, push]
+    Priority:
+      type: string
+      enum: [high, normal, low]
+      default: normal
